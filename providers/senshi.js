@@ -2,10 +2,14 @@ import { json, episodeMeta }                                  from "../core/new-
 import { getMedia }                                        from "../core/anilist.js";
 import { get as cacheGet, set as cacheSet, isFresh,
          SHOW_IDENTITY_TTL }                               from "../core/smartcache.js";
+import { wreqFetch }                                       from "../core/wreq.js";
 
-const BASE = "https://senshi.live";
-const UA   = "Mozilla/5.0 (X11; Linux x86_64; rv:146.0) Gecko/20100101 Firefox/146.0";
+const BASE = "https://senshi.to";
+const VID_CLOUD = "https://s.vidcloud.se";
+const UA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 const H    = { "User-Agent": UA, "Referer": `${BASE}/` };
+const SENSHI_WREQ_BROWSER = process.env.SENSHI_WREQ_BROWSER || "chrome_149";
+const SENSHI_WREQ_OS = process.env.SENSHI_WREQ_OS || "windows";
 
 async function fetchEpisodeList(malId) {
   const res = await fetch(`${BASE}/episodes/${malId}`, { headers: H });
@@ -37,6 +41,54 @@ function isDub(status) {
   return (status ?? "").toLowerCase() === "dub";
 }
 
+function sourceAudioMatches(entry, audio) {
+  const sourceAudio = entry?.source?.audio;
+  if (!sourceAudio) return true;
+  const normalized = sourceAudio.toLowerCase();
+  return normalized === "both" || normalized === audio;
+}
+
+function mapTrack(track) {
+  const url = track?.vtt_url || track?.url;
+  if (!url) return null;
+  const label = track.label || "English";
+  if (label.toLowerCase() === "chapter") return null;
+  const lang = label.toLowerCase().split(/\s+/)[0];
+  return {
+    url,
+    label,
+    srclang: lang === "english" ? "en" : lang.slice(0, 2),
+    default: Boolean(track.default),
+  };
+}
+
+async function fetchVidCloudSources(remoteSourceId) {
+  if (!remoteSourceId) return [];
+  const url = `${VID_CLOUD}/_v1/sources?id=${encodeURIComponent(remoteSourceId)}`;
+  const headers = {
+    "User-Agent": UA,
+    "Accept": "application/json,*/*",
+    "Origin": BASE,
+    "Referer": `${BASE}/`,
+  };
+
+  let res;
+  try {
+    res = await wreqFetch(url, {
+      session: "senshi",
+      browser: SENSHI_WREQ_BROWSER,
+      os: SENSHI_WREQ_OS,
+      headers,
+    });
+  } catch {
+    res = await fetch(url, { headers });
+  }
+
+  if (!res.ok) throw new Error(`Senshi vidcloud ${res.status} (source ${remoteSourceId})`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : data ? [data] : [];
+}
+
 export async function getEpisodes(anilistId, ctx = {}) {
   const malId = await resolveMalId(anilistId);
   const items = await fetchEpisodeList(malId);
@@ -62,7 +114,7 @@ export async function getEpisodes(anilistId, ctx = {}) {
     const filler = item.ep_filler || meta.filler || false;
     const recap = item.ep_recap || false;
     const description = meta.description;
-    const image = meta.image;
+    const image = item.ep_thumbnail || meta.image;
     const airDate = meta.airDate;
 
     sub.push({
@@ -138,14 +190,41 @@ async function handleWatch(anilistId, audio, epNum) {
 
   const streams   = [];
   const downloads = [];
+  const subtitles = [];
 
-  if (source.url) {
+  if (source.remote_source_id) {
+    const vidCloudSources = await fetchVidCloudSources(source.remote_source_id).catch(() => []);
+    const usableSources = vidCloudSources.filter(entry => entry?.source?.src && sourceAudioMatches(entry, audio));
+    for (const entry of usableSources) {
+      const itemSubs = [];
+      for (const track of entry.tracks || []) {
+        const mapped = mapTrack(track);
+        if (!mapped) continue;
+        itemSubs.push(mapped);
+        if (!subtitles.some(sub => sub.url === mapped.url)) subtitles.push(mapped);
+      }
+
+      streams.push({
+        url:      entry.source.src,
+        type:     "hls",
+        server:   "Senshi",
+        referer:  `${BASE}/`,
+        quality:  entry.source.quality || null,
+        subtitles: itemSubs,
+        fonts:    Array.isArray(entry.font) ? entry.font : [],
+        priority: streams.length ? 4 : 5,
+        isActive: streams.length === 0,
+      });
+    }
+  }
+
+  if (!streams.length && source.url) {
     streams.push({
-      url:      source.url,
-      type:     "hls",
+      url:      source.url.replace(/^http:\/\//i, "https://"),
+      type:     "embed",
       server:   "Senshi",
       referer:  `${BASE}/`,
-      priority: 5,
+      priority: 4,
       isActive: true,
     });
   }
@@ -184,6 +263,7 @@ async function handleWatch(anilistId, audio, epNum) {
     intro,
     outro,
     streams,
+    subtitles,
     downloads,
     headers:   H,
   });
