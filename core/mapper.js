@@ -1,5 +1,6 @@
 const __name = (fn, _) => fn;
 import { getMedia } from './anilist.js';
+import { anilist } from './anilist-gate.js';
 
 var ARM2 = "https://arm.haglund.dev/api/v2/ids";
 var UA2 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0";
@@ -41,14 +42,9 @@ async function fetchAniListRelations(anilistId) {
     }
   }`;
   try {
-    const res = await fetch("https://graphql.anilist.co", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Accept": "application/json" },
-      body: JSON.stringify({ query: q, variables: { id: Number(anilistId) } })
-    });
-    if (!res.ok) return null;
-    const json6 = await res.json();
-    return json6.data?.Media ?? null;
+    // Through the shared gate: cached for a day, rate limited, and stops when AniList says it has blocked us.
+    const data = await anilist(q, { id: Number(anilistId) }, { key: `relations:${Number(anilistId)}`, ttl: 24 * 60 * 60 * 1000 });
+    return data?.Media ?? null;
   } catch {
     return null;
   }

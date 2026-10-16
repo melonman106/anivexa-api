@@ -1,4 +1,5 @@
 import { get, set, isFresh, SHOW_IDENTITY_TTL } from "./smartcache.js";
+import { anilist } from "./anilist-gate.js";
 
 export const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -313,15 +314,8 @@ export async function findTopSlugs(titles, searchFn, n = 6) {
 }
 
 async function anilistQuery(query, variables) {
-  const res = await fetch("https://graphql.anilist.co", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ query, variables }),
-  });
-  if (!res.ok) throw new Error(`AniList HTTP ${res.status}`);
-  const json = await res.json();
-  if (json.errors?.length) throw new Error(`AniList: ${json.errors[0].message}`);
-  return json.data;
+  // Shared gate: cached, rate limited and block-aware (see core/anilist-gate.js).
+  return anilist(query, variables, { key: `np:${query.length}:${JSON.stringify(variables)}`, ttl: 24 * 60 * 60 * 1000 });
 }
 
 function computePrequelOffset(relations, depth = 0) {

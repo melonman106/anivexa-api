@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { wreqFetch } from "../core/wreq.js";
+import { anilist } from "../core/anilist-gate.js";
 import { buildTitleSearchQueries, buildTitles, titleIdentityScore } from "../core/new-provider-utils.js";
 
 const __name = (fn, _) => fn;
@@ -1110,14 +1111,9 @@ __name(findBestMatch, "findBestMatch");
 async function fetchAniListMedia(anilistId) {
   try {
     const q = "query ($id: Int) { Media (id: $id, type: ANIME) { seasonYear startDate { year } title { romaji english native } } }";
-    const res = await fetch("https://graphql.anilist.co", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Accept": "application/json", "User-Agent": UA4, "Origin": "https://anilist.co" },
-      body: JSON.stringify({ query: q, variables: { id: Number(anilistId) } })
-    });
-    if (!res.ok) return null;
-    const json = await res.json();
-    return json.data?.Media ?? null;
+    // Shared gate: cached, rate limited, honest User-Agent, stops when AniList blocks us.
+    const data = await anilist(q, { id: Number(anilistId) }, { key: `mk-media:${Number(anilistId)}`, ttl: 24 * 60 * 60 * 1000 });
+    return data?.Media ?? null;
   } catch {
     return null;
   }
@@ -1355,14 +1351,8 @@ async function fetchAniListFull(anilistId) {
       }
     }
   }`;
-  const res = await fetch("https://graphql.anilist.co", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "application/json", "User-Agent": UA4, "Origin": "https://anilist.co" },
-    body: JSON.stringify({ query: q, variables: { id: Number(anilistId) } })
-  });
-  if (!res.ok) throw new Error("AniList fetch failed");
-  const json = await res.json();
-  return json.data?.Media;
+  const data = await anilist(q, { id: Number(anilistId) }, { key: `mk-full:${Number(anilistId)}`, ttl: 24 * 60 * 60 * 1000 });
+  return data?.Media;
 }
 __name(fetchAniListFull, "fetchAniListFull");
 

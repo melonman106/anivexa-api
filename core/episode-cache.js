@@ -1,4 +1,5 @@
 import { forgetMedia, getMedia } from "./anilist.js";
+import { anilistStatus } from "./anilist-gate.js";
 import { mapAnimeIds } from "./mapper.js";
 import { buildEpisodesWithCache, buildFilteredEpisodesWithCache } from "./episode-strategy.js";
 import { get, set, getAsync, setAsync, needsRefresh, delAsync, delByPrefixAsync } from "./smartcache.js";
@@ -128,6 +129,9 @@ function scheduleRefresh(anilistId, entry, env) {
   const key = `ep-bg:${anilistId}`;
   if (refreshing.has(key)) return;
 
+  // AniList is paused (blocked / rate limited): keep serving the cached episodes and try again later.
+  if (anilistStatus().state !== "ok") return;
+
   const syncKey = `sync:${anilistId}`;
   const oldState = get(syncKey)?.data;
   const now = Date.now();
@@ -138,6 +142,7 @@ function scheduleRefresh(anilistId, entry, env) {
 
   const task = (async () => {
     const [media, anizip] = await resolveShared(anilistId, true);
+    if (!media) throw new Error("AniList unavailable; keeping cached episodes");
     const cachedLatest = latestEpisodeFromResponse(entry?.data);
     const next = media?.nextAiringEpisode ?? null;
 
@@ -190,7 +195,9 @@ export async function getEpisodesResponse(anilistId, env) {
 
   const [media, anizip] = await resolveShared(anilistId);
   const result = await buildResponse(anilistId, media, anizip);
-  await setAsync(cacheKey, result, FULL_TTL, NORMAL_PROBE_INTERVAL);
+  // Without AniList data the result may be incomplete: keep it only briefly instead of for 30 days.
+  if (media) await setAsync(cacheKey, result, FULL_TTL, NORMAL_PROBE_INTERVAL);
+  else await setAsync(cacheKey, result, 10 * MIN, 2 * MIN);
   writeSyncState(anilistId, {
     lastProbeAt: Date.now(),
     lastSyncAt: Date.now(),

@@ -4,7 +4,8 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node test/gate-test.mjs && node test/api-blocked-test.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

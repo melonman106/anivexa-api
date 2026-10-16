@@ -211,9 +211,26 @@ Copy `.env.example` to `.env` and fill in the values.
 | `UPSTASH_REDIS_REST_URL` | — | From [upstash.com](https://upstash.com). Only used when `CACHE_ENABLED=true`. |
 | `UPSTASH_REDIS_REST_TOKEN` | — | From [upstash.com](https://upstash.com). Only used when `CACHE_ENABLED=true`. |
 | `DEFAULT_REDIS_TTL` | `900` | Seconds. Fallback expiry for Redis writes when a per-item TTL isn't computed. Most cache entries use their own smart TTLs based on anime status (finished/airing/etc.) — this is just the safety-net default. |
+| `ANILIST_MIN_INTERVAL_MS` | `2200` | Minimum gap between requests sent to AniList (≈ 27/min, under AniList's current 30/min limit). |
+| `ANILIST_MAX_QUEUE` | `25` | Lookups allowed to wait for their turn. Extra ones fail fast instead of piling up. |
+| `ANILIST_TIMEOUT_MS` | `15000` | Timeout for one AniList request. |
+| `ANILIST_USER_AGENT` | `Anivexa-API/2.3 (+repo url)` | Sent to AniList. Put a contact (site URL or email) in it if you can. |
 | `PORT` | `4000` | Local dev server port (`server.js` only — ignored on Vercel/serverless). Change it if `4000` is already in use, then hit `http://localhost:PORT`. |
 
 On Vercel (or Railway/Render), set these as regular project environment variables instead of committing `.env`.
+
+### AniList rate limits and blocks
+
+AniList blocks IP addresses that send too many requests (the page says *"You have been manually blocked. Please come to the principal's office."*). All AniList traffic therefore goes through one place, `core/anilist-gate.js`, which:
+
+- sends one request at a time with a minimum gap, using an honest `User-Agent` (no browser impersonation, no `Origin` spoofing, no website fallback);
+- caches answers (memory, plus Redis/disk when `CACHE_ENABLED=true`) and shares identical in-flight lookups;
+- on `429` waits for `Retry-After`; on a block (`403` / the "manually blocked" message) it **stops calling AniList entirely** for 15 min, then 1 h, 6 h, 24 h, and probes with a single request when each pause ends;
+- while paused, or when AniList errors, serves the saved answer (up to 7 days old) instead of failing.
+
+`GET /anilist-status` shows the current state (`ok`, `limited` or `blocked`, seconds until the next attempt, cache hit counts).
+
+**This code cannot lift a block.** If `/anilist-status` says `blocked`, the block is on AniList's side: ask AniList to lift it (their community Discord server is the usual place; there is no automatic appeal) and tell them which server/IP it is and what changed. Check from another network (a phone on mobile data) to find out whether it is this server's IP or your own that is blocked. Turning on `CACHE_ENABLED=true` with Upstash makes the API remember answers across restarts, which cuts AniList traffic a lot on hosts that restart often (e.g. Render's free tier).
 
 ---
 

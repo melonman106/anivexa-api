@@ -1,10 +1,11 @@
 const __name = (fn, _) => fn;
+import { anilist, invalidate } from "./anilist-gate.js";
 
-var resolved = new Map();
+var resolved = new Map(); // id → { media, at }
 var inflight = new Map();
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 var ARM = "https://arm.haglund.dev/api/v2/ids";
-var ANILIST_WEB = "https://anilist.co";
+var MEDIA_TTL_MS = 6 * 60 * 60 * 1000;
 
 const AL_STATUS_MAP = {
   RELEASING: "RELEASING",
@@ -14,70 +15,31 @@ const AL_STATUS_MAP = {
   HIATUS: "HIATUS",
 };
 
-function cookiesFromHeaders(headers) {
-  const values = typeof headers.getSetCookie === "function" ? headers.getSetCookie() : [headers.get("set-cookie")].filter(Boolean);
-  return values.map((value) => String(value).split(";")[0]).join("; ");
-}
+const MEDIA_QUERY = `query($id:Int){Media(id:$id,type:ANIME){id idMal title{english romaji native} status format episodes seasonYear startDate{year} genres synonyms nextAiringEpisode{episode airingAt timeUntilAiring}}}`;
+const mediaKey = (id) => `media:${id}`;
 
-async function mediaFromResponse(res) {
-  if (!res?.ok) return null;
-  try {
-    const json = await res.json();
-    return json.data?.Media ?? null;
-  } catch {
-    return null;
-  }
-}
-
-async function fetchFromAniListWeb(body) {
-  const home = await fetch(`${ANILIST_WEB}/`, {
-    headers: { "User-Agent": UA, Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
-  }).catch(() => null);
-  if (!home?.ok) return null;
-  const html = await home.text();
-  const token = html.match(/window\.al_token\s*=\s*"([^"]+)"/)?.[1];
-  const cookie = cookiesFromHeaders(home.headers);
-  if (!token || !cookie) return null;
-  const res = await fetch(`${ANILIST_WEB}/graphql`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      "User-Agent": UA,
-      Referer: `${ANILIST_WEB}/home`,
-      "x-csrf-token": token,
-      schema: "default",
-      Cookie: cookie,
-    },
-    body,
-  }).catch(() => null);
-  return mediaFromResponse(res);
-}
-
+// All AniList traffic goes through ./anilist-gate.js (cache, one-at-a-time sending, rate-limit + block handling).
+// There is deliberately no fallback that talks to anilist.co as a browser: if the API refuses us we stop and use the cache.
 async function fetchFromAniList(id) {
-  const fullQuery = `query($id:Int){Media(id:$id,type:ANIME){id idMal title{english romaji native} status format episodes seasonYear startDate{year} genres synonyms nextAiringEpisode{episode airingAt timeUntilAiring}}}`;
-  const body = JSON.stringify({ query: fullQuery, variables: { id } });
-  const res = await fetch("https://graphql.anilist.co", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "application/json", "User-Agent": UA },
-    body,
-  }).catch(() => null);
-  return await mediaFromResponse(res) ?? fetchFromAniListWeb(body);
+  const data = await anilist(MEDIA_QUERY, { id }, { key: mediaKey(id), ttl: MEDIA_TTL_MS });
+  return data?.Media ?? null;
 }
 
 async function getMedia(anilistId) {
   const id = Number(anilistId);
-  if (resolved.has(id)) return resolved.get(id);
+  const memo = resolved.get(id);
+  if (memo && Date.now() - memo.at < MEDIA_TTL_MS) return memo.media;
   if (inflight.has(id)) return inflight.get(id);
   const promise = (async () => {
-    const arm = await fetch(`${ARM}?source=anilist&id=${id}`, {
-      headers: { "User-Agent": UA, "Accept": "application/json" }
-    }).then((r) => {
-      if (!r.ok) return null;
-      return r.json();
-    }).catch(() => null);
-
-    const al = await fetchFromAniList(id);
+    const [arm, al] = await Promise.all([
+      fetch(`${ARM}?source=anilist&id=${id}`, {
+        headers: { "User-Agent": UA, "Accept": "application/json" }
+      }).then((r) => {
+        if (!r.ok) return null;
+        return r.json();
+      }).catch(() => null),
+      fetchFromAniList(id),
+    ]);
     if (!al) throw new Error(`No data found for AniList ID ${id}`);
     const media = {
       id,
@@ -96,20 +58,19 @@ async function getMedia(anilistId) {
       nextAiringEpisode: al.nextAiringEpisode ?? null,
       synonyms: Array.isArray(al.synonyms) ? al.synonyms : [],
     };
-    resolved.set(id, media);
-    inflight.delete(id);
+    resolved.set(id, { media, at: Date.now() });
     return media;
-  })().catch((e) => {
-    inflight.delete(id);
-    throw e;
-  });
+  })().finally(() => inflight.delete(id));
   inflight.set(id, promise);
   return promise;
 }
 __name(getMedia, "getMedia");
 
+/** Ask for fresh data next time. The old copy is kept as a fallback in case AniList can't be reached. */
 function forgetMedia(anilistId) {
-  resolved.delete(Number(anilistId));
+  const id = Number(anilistId);
+  resolved.delete(id);
+  invalidate(mediaKey(id));
 }
 
 export { getMedia, forgetMedia };

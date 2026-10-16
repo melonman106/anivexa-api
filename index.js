@@ -1,4 +1,5 @@
 import { getMedia }                from "./core/anilist.js";
+import { anilistStatus }           from "./core/anilist-gate.js";
 import { mapAnimeIds }             from "./core/mapper.js";
 import mkissaHandler               from "./providers/mkissa.js";
 import reanimeHandler              from "./providers/reanime.js";
@@ -79,6 +80,12 @@ export default {
       });
     }
 
+    if (path === "/anilist-status") {
+      return new Response(JSON.stringify(anilistStatus(), null, 2), {
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" },
+      });
+    }
+
     let m = path.match(/^\/map\/(\d+)\/?$/);
     if (m) {
       const anilistId = m[1];
@@ -91,7 +98,13 @@ export default {
           mapAnimeIds(anilistId),
           getMedia(anilistId).catch(() => null),
         ]);
-        await setAsync(cacheKey, data, mapTTL(media?.status ?? "RELEASING"));
+        if (media) {
+          await setAsync(cacheKey, data, mapTTL(media.status ?? "RELEASING"));
+          return json(data);
+        }
+        // AniList couldn't be reached (blocked / rate limited): serve what we had, or a short-lived partial map.
+        if (entry) return json(entry.data);
+        await setAsync(cacheKey, data, 5 * 60 * 1000);
         return json(data);
       } catch (e) {
         if (entry) return json(entry.data);
@@ -271,6 +284,7 @@ export default {
       ],
       routes: [
         "/map/:anilistId",
+        "/anilist-status",
         "/episodes/:anilistId",
         "/episodes/:provider[/:provider...]/:anilistId?map=true|false",
         "/watch/mkissa/:id/sub|dub/mkissa-:ep",
